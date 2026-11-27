@@ -22,7 +22,9 @@ from mistralai.workflows.plugins.mistralai.connectors import (
 with workflows.workflow.unsafe.imports_passed_through():
     import httpx
 
-gmail_connector = connector("gmail")
+# auto_auth=False: no credential preflight at execution start, so the price extraction runs even
+# when the deployment has no gmail credential yet; the slot resolves lazily inside the send activity.
+gmail_connector = connector("gmail", auto_auth=False)
 
 DEFAULT_ISIN = "LU1775981274"
 DEFAULT_CURRENCY = "GBP"
@@ -107,6 +109,7 @@ class FundPriceReport(pydantic.BaseModel):
     price: FundPrice
     email_sent: bool = False
     email_message_id: str | None = None
+    email_error: str | None = None
 
 
 def _to_float(value: object) -> float | None:
@@ -375,8 +378,11 @@ class FundDailyPriceWorkflow:
         report = FundPriceReport(price=price)
         if input.send_email and input.email_to:
             subject, body = compose_email(price)
-            report.email_message_id = await send_price_email(
-                input.email_to, subject, body
-            )
-            report.email_sent = True
+            try:
+                report.email_message_id = await send_price_email(
+                    input.email_to, subject, body
+                )
+                report.email_sent = True
+            except Exception as exc:
+                report.email_error = f"{type(exc).__name__}: {exc}"
         return report
