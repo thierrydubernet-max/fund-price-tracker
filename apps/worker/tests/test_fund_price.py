@@ -9,6 +9,7 @@ from mistralai.workflows.testing import create_test_worker
 from support.http_clients import patch_http_send
 from worker.workflows.fund_price import (
     FundDailyPriceWorkflow,
+    extract_ft_price,
     extract_price,
     fetch_ft_price,
     fetch_fondsweb_price,
@@ -29,10 +30,28 @@ FT_INLINE_HTML = """
 <html><head><script>window.__data = {"lastPrice": 240.31, "currency": "GBX", "lastPriceDate": "26 Nov 2026"};</script></head></html>
 """
 
+FT_QUOTE_HTML = """
+<html><body><div class="mod-tearsheet-overview__quote"><ul class="mod-tearsheet-overview__quote__bar">
+<li><span class="mod-ui-data-list__label" title="NAV">Price (GBP)</span><span class="mod-ui-data-list__value">2.44</span></li>
+<li><span class="mod-ui-data-list__label">Today's Change</span><span class="mod-ui-data-list__value"><span class="mod-format--neg">-0.004 / -0.16%</span></span></li>
+</ul><div class="mod-disclaimer">Data delayed at least 15 minutes, as of Nov 26 2026.</div></div></body></html>
+"""
+
 FONDSWEB_HTML = """
 <html><body><div class="nav">NAV vom 19.10.2026 &middot; 2,40 GBP</div>
 <span>Letzte Ausschüttung: 0,03 GBP am 01.09.2026</span></body></html>
 """
+
+
+def test_extract_ft_price_from_tearsheet_quote_block() -> None:
+    price = extract_ft_price(FT_QUOTE_HTML, "LU1775981274", "GBP")
+    assert price is not None
+    assert price.price == 2.44
+    assert price.currency == "GBP"
+    assert price.as_of == "Nov 26 2026"
+    assert price.change_pct == -0.16
+    assert price.previous_price == 2.444
+    assert price.source == "markets.ft.com"
 
 
 def test_extract_price_from_ft_json_blob() -> None:

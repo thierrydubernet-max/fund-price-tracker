@@ -70,7 +70,7 @@ _DATE_KEYS = (
 _CURRENCY_KEYS = ("currency", "currencycode", "currencyid")
 
 _PRICE_TEXT_RE = re.compile(
-    r"(?i)(?:price|nav|kurs|close|valor).{0,120}?([0-9]+(?:[.,][0-9]+)?)\s*(GBX|GBP|p|pence)\b",
+    r"(?i)(?:price|nav|kurs|close|valor).{0,120}?([0-9]+[.,][0-9]{2,4})\s*(GBX|GBP|p|pence)\b",
     re.S,
 )
 _DATE_TEXT_RE = re.compile(
@@ -88,6 +88,21 @@ _CHANGE_PCT_RE = re.compile(
     r"(?i)(?:day change|variation)[^0-9]{0,40}\(?\s*([+-]?[0-9]+(?:[.,][0-9]+)?)\s*%"
 )
 
+# markets.ft.com tearsheet quote block, e.g.:
+# <span class="mod-ui-data-list__label" ...>Price (GBP)</span><span class="mod-ui-data-list__value">2.44</span>
+# <span class="mod-ui-data-list__label" ...>Today's Change</span>...-0.004 / -0.16%
+# <div class="mod-disclaimer">Data delayed at least 15 minutes, as of Nov 26 2026.</div>
+_FT_PRICE_RE = re.compile(
+    r'mod-ui-data-list__label"[^>]*>\s*Price\s*\(([A-Z]{3})\)\s*</span>'
+    r'\s*<span class="mod-ui-data-list__value">\s*([0-9]+(?:[.,][0-9]+)?)\s*</span>'
+)
+_FT_CHANGE_RE = re.compile(
+    r"Today's Change</span><span class=\"mod-ui-data-list__value\">.*?"
+    r"([+-]?[0-9]+(?:[.,][0-9]+)?)\s*/\s*([+-]?[0-9]+(?:[.,][0-9]+)?)\s*%",
+    re.S,
+)
+_FT_DATE_RE = re.compile(r"(?i)as of\s+([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4})")
+
 
 class FundPriceInput(pydantic.BaseModel):
     isin: str = DEFAULT_ISIN
@@ -102,6 +117,7 @@ class FundPrice(pydantic.BaseModel):
     price: float
     currency: str
     as_of: str | None = None
+    previous_price: float | None = None
     change_pct: float | None = None
 
 
@@ -169,6 +185,36 @@ def _normalize(
             price / 100.0, 6
         ), "GBP" if currency_hint.upper() == "GBP" else currency
     return round(price, 6), currency
+
+
+def extract_ft_price(html: str, isin: str, currency_hint: str) -> FundPrice | None:
+    """Parse the server-rendered quote block of a markets.ft.com fund tearsheet."""
+    price_match = _FT_PRICE_RE.search(html)
+    if price_match is None:
+        return None
+    raw_price = _to_float(price_match.group(2))
+    if raw_price is None:
+        return None
+    price, currency = _normalize(raw_price, price_match.group(1), currency_hint)
+    as_of_match = _FT_DATE_RE.search(html)
+    as_of = as_of_match.group(1).strip() if as_of_match else None
+    change_pct: float | None = None
+    previous_price: float | None = None
+    change_match = _FT_CHANGE_RE.search(html)
+    if change_match is not None:
+        change_amount = _to_float(change_match.group(1))
+        change_pct = _to_float(change_match.group(2))
+        if change_amount is not None:
+            previous_price = round(price - change_amount, 6)
+    return FundPrice(
+        isin=isin,
+        source="markets.ft.com",
+        price=price,
+        currency=currency,
+        as_of=as_of,
+        previous_price=previous_price,
+        change_pct=change_pct,
+    )
 
 
 def extract_price(
@@ -245,7 +291,7 @@ async def http_get(url: str) -> str:
         "Accept-Language": "en-GB,en;q=0.9",
     }
     async with httpx.AsyncClient(
-        timeout=timedelta(seconds=45), follow_redirects=True, headers=headers
+        timeout=45.0, follow_redirects=True, headers=headers
     ) as client:
         response = await client.get(url)
     response.raise_for_status()
@@ -259,7 +305,7 @@ async def http_get(url: str) -> str:
 )
 async def fetch_ft_price(isin: str, currency: str) -> FundPrice | None:
     html = await http_get(FT_TEARSHEET_URL.format(isin=isin, currency=currency))
-    return extract_price(
+    return extract_ft_price(html, isin, currency) or extract_price(
         html, source="markets.ft.com", isin=isin, currency_hint=currency
     )
 
